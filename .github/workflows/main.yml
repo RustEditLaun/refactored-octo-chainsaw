@@ -77,11 +77,11 @@ jobs:
           
           Write-Output "Starting Patcher to download full RustEdit files..."
           
-          # ВАЖНО: Добавлены флаги --readable и -batchmode -nographics (для скрытой работы без интерфейса)
-          $args = "--installdir `"$installDir`" --secret 17ad1bce388b0f0a7566b8a8597c53d6 --readable -batchmode -nographics"
-          Start-Process -FilePath "$patcherExe" -ArgumentList $args -NoNewWindow
+          # Запускаем патчер в скрытом режиме и заставляем его работать внутри папки RustEdit_App
+          $patcherArgs = "--secret 17ad1bce388b0f0a7566b8a8597c53d6 --readable -batchmode -nographics"
+          Start-Process -FilePath "$patcherExe" -ArgumentList $patcherArgs -WorkingDirectory "$installDir" -NoNewWindow
           
-          $timeout = 900 # Ждем максимум 15 минут
+          $timeout = 900 # Максимальное время скачивания - 15 минут
           $stopwatch =[Diagnostics.Stopwatch]::StartNew()
           $isDownloaded = $false
           
@@ -91,14 +91,12 @@ jobs:
               $patcherRunning = Get-Process "*Patcher*" -ErrorAction SilentlyContinue
               $gameRunning = Get-Process "RustEdit" -ErrorAction SilentlyContinue
               
-              # Если запустился процесс самой игры - значит скачивание 100% успешно завершено!
               if ($gameRunning) {
                   Write-Output "RustEdit.exe has launched! Download is complete."
                   $isDownloaded = $true
                   break
               }
               
-              # Если патчер закрылся сам - тоже успех
               if (-not $patcherRunning) {
                   Write-Output "Patcher process exited gracefully."
                   $isDownloaded = $true
@@ -112,10 +110,14 @@ jobs:
               Write-Error "Timeout reached or Patcher hung!"
           }
           
-          # Принудительно убиваем все процессы (патчер и саму игру), чтобы Action не завис
           Write-Output "Cleaning up processes..."
           Stop-Process -Name "*Patcher*" -Force -ErrorAction SilentlyContinue
           Stop-Process -Name "RustEdit*" -Force -ErrorAction SilentlyContinue
+          
+          # Удаляем временную папку загрузок (кэш патчера), чтобы она не утяжеляла ZIP-архив
+          if (Test-Path "$installDir\.downloads") {
+              Remove-Item -Path "$installDir\.downloads" -Recurse -Force -ErrorAction SilentlyContinue
+          }
           
           Write-Output "RustEdit Download Finished!"
 
