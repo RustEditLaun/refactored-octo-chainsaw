@@ -1,63 +1,50 @@
-name: Human-like RustEdit Archiver
+name: Auto-Build and Publish RustEdit
 
 on:
-  workflow_dispatch:
+  schedule:
+    # Run every day at MN
+    - cron: '0 0 * * *'
+  workflow_dispatch: # Allow manual trigger
 
 jobs:
   build:
     runs-on: windows-latest
+    
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      - name: Download & Install Launcher
-        run: |
-          # 1. Скачиваем архив с лаунчером (эмулируем браузер)
-          Invoke-WebRequest -Uri "https://www.rustedit.io/resources/rustedit-launcher.16/download" -OutFile "launcher_bundle.zip"
-          Expand-Archive -Path "launcher_bundle.zip" -DestinationPath "setup_temp" -Force
-          
-          # 2. Тихая установка (Inno Setup стандартные флаги)
-          $setupExe = Get-ChildItem -Path "setup_temp" -Filter "*Setup*.exe" | Select-Object -First 1
-          Start-Process -FilePath $setupExe.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$PWD\RustEdit_Installed`"" -Wait -NoNewWindow
-          
-          Write-Output "Installation completed in $PWD\RustEdit_Installed"
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
 
-      - name: Launch & Download Game Files
-        run: |
-          # 3. Запуск лаунчера для загрузки игры
-          # Предполагаем, что exe называется RustEdit Launcher.exe
-          $launcherExe = "$PWD\RustEdit_Installed\RustEdit Launcher.exe"
-          
-          Write-Output "Starting Launcher to download game files..."
-          Start-Process -FilePath "$launcherExe" -ArgumentList "--install" -NoNewWindow
-          
-          # Ждем появления файлов игры (например, RustEdit.exe) в папке установки
-          $timeout = 1200 # 20 минут
-          $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
-          $found = $false
-          
-          while ($stopwatch.Elapsed.TotalSeconds -lt $timeout) {
-            if (Test-Path "$PWD\RustEdit_Installed\RustEdit.exe") {
-              $found = $true
-              break
-            }
-            Start-Sleep -Seconds 10
-          }
-          
-          # Убиваем лаунчер, чтобы он не держал файлы
-          Stop-Process -Name "RustEdit Launcher*" -Force
-          
-          if (-not $found) { throw "Timeout: Game files not downloaded." }
-
-      - name: Archive Results
-        run: |
-          # 4. Пакуем всё содержимое папки установки в ZIP
-          Compress-Archive -Path "RustEdit_Installed\*" -DestinationPath "RustEdit_Full.zip"
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          files: RustEdit_Full.zip
-          tag_name: "vLatest"
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    - name: Run Update Script
+      run: python scripts/update_rustedit.py
+      
+    - name: Read Version
+      id: get_version
+      run: |
+        $VERSION = Get-Content build_version.txt
+        echo "VERSION=$VERSION" >> $env:GITHUB_ENV
+        
+    - name: Check if Release Exists
+      id: check_release
+      uses: mukunku/tag-exists-action@v1.2.0
+      with:
+        repo: ${{ github.repository }}
+        tag: 'v${{ env.VERSION }}'
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        
+    - name: Create Release and Upload Zip
+      if: steps.check_release.outputs.exists == 'false'
+      uses: softprops/action-gh-release@v1
+      with:
+        tag_name: v${{ env.VERSION }}
+        name: RustEdit v${{ env.VERSION }}
+        files: RustEdit_v${{ env.VERSION }}.zip
+        draft: false
+        prerelease: false
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
