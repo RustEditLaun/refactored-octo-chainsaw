@@ -13,7 +13,12 @@ INSTALL_DIR = "RustEditClient"
 
 def download_launcher():
     print(f"Downloading {LAUNCHER_EXE} from {DOWNLOAD_URL}...")
-    urllib.request.urlretrieve(DOWNLOAD_URL, LAUNCHER_EXE)
+    req = urllib.request.Request(
+        DOWNLOAD_URL, 
+        headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+    )
+    with urllib.request.urlopen(req) as response, open(LAUNCHER_EXE, 'wb') as out_file:
+        shutil.copyfileobj(response, out_file)
     print("Download complete.")
 
 def run_and_wait_for_download():
