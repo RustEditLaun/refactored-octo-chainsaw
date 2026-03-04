@@ -1,66 +1,63 @@
-name: Automate RustEdit Archiving
+name: Human-like RustEdit Archiver
 
 on:
-  schedule:
-    - cron: '0 */6 * * *'
   workflow_dispatch:
 
 jobs:
-  archive-rustedit:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
+  build:
+    runs-on: windows-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Download and Archive
-        shell: bash
+      - name: Download & Install Launcher
         run: |
-          SECRET="17ad1bce388b0f0a7566b8a8597c53d6"
+          # 1. Скачиваем архив с лаунчером (эмулируем браузер)
+          Invoke-WebRequest -Uri "https://www.rustedit.io/resources/rustedit-launcher.16/download" -OutFile "launcher_bundle.zip"
+          Expand-Archive -Path "launcher_bundle.zip" -DestinationPath "setup_temp" -Force
           
-          # 1. Получаем ID последней версии
-          LATEST_JSON=$(curl -s "https://api2.patchkit.net/1/apps/$SECRET/versions/latest")
-          VERSION_ID=$(echo $LATEST_JSON | jq -r '.id')
-          VERSION_LABEL=$(echo $LATEST_JSON | jq -r '.label')
+          # 2. Тихая установка (Inno Setup стандартные флаги)
+          $setupExe = Get-ChildItem -Path "setup_temp" -Filter "*Setup*.exe" | Select-Object -First 1
+          Start-Process -FilePath $setupExe.FullName -ArgumentList "/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$PWD\RustEdit_Installed`"" -Wait -NoNewWindow
           
-          echo "Latest Version: $VERSION_LABEL (ID: $VERSION_ID)"
+          Write-Output "Installation completed in $PWD\RustEdit_Installed"
+
+      - name: Launch & Download Game Files
+        run: |
+          # 3. Запуск лаунчера для загрузки игры
+          # Предполагаем, что exe называется RustEdit Launcher.exe
+          $launcherExe = "$PWD\RustEdit_Installed\RustEdit Launcher.exe"
           
-          # 2. Проверяем, нужно ли скачивать
-          mkdir -p version_info
-          if [ -f "version_info/last_version.txt" ]; then
-            LOCAL_VERSION=$(cat version_info/last_version.txt)
-            if [ "$LOCAL_VERSION" == "$VERSION_LABEL" ]; then
-              echo "Already up to date."
-              exit 0
-            fi
-          fi
+          Write-Output "Starting Launcher to download game files..."
+          Start-Process -FilePath "$launcherExe" -ArgumentList "--install" -NoNewWindow
           
-          # 3. Получаем прямую ссылку на скачивание (CDN)
-          URL_JSON=$(curl -s "https://api2.patchkit.net/1/apps/$SECRET/versions/$VERSION_ID/content_urls")
-          # Берем первую доступную ссылку
-          DOWNLOAD_URL=$(echo $URL_JSON | jq -r '.[0].url')
+          # Ждем появления файлов игры (например, RustEdit.exe) в папке установки
+          $timeout = 1200 # 20 минут
+          $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+          $found = $false
           
-          echo "Downloading from: $DOWNLOAD_URL"
-          curl -L "$DOWNLOAD_URL" -o "RustEdit_v$VERSION_LABEL.zip"
+          while ($stopwatch.Elapsed.TotalSeconds -lt $timeout) {
+            if (Test-Path "$PWD\RustEdit_Installed\RustEdit.exe") {
+              $found = $true
+              break
+            }
+            Start-Sleep -Seconds 10
+          }
           
-          # 4. Сохраняем версию
-          echo "$VERSION_LABEL" > version_info/last_version.txt
-          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
+          # Убиваем лаунчер, чтобы он не держал файлы
+          Stop-Process -Name "RustEdit Launcher*" -Force
+          
+          if (-not $found) { throw "Timeout: Game files not downloaded." }
+
+      - name: Archive Results
+        run: |
+          # 4. Пакуем всё содержимое папки установки в ZIP
+          Compress-Archive -Path "RustEdit_Installed\*" -DestinationPath "RustEdit_Full.zip"
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ env.VERSION_LABEL }}
-          files: RustEdit_v${{ env.VERSION_LABEL }}.zip
+          files: RustEdit_Full.zip
+          tag_name: "vLatest"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Commit version
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add version_info/last_version.txt
-          git commit -m "Update to ${{ env.VERSION_LABEL }}"
-          git push
