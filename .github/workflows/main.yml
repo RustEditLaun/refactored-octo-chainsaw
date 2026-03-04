@@ -53,11 +53,16 @@ jobs:
           chmod +x patchkit-tools/patchkit-tools
           echo "$(pwd)/patchkit-tools" >> $GITHUB_PATH
 
+      - name: Debug PatchKit Tools
+        if: env.NEW_VERSION_FOUND == 'true'
+        run: |
+          ./patchkit-tools/patchkit-tools --help
+
       - name: Download RustEdit Full
         if: env.NEW_VERSION_FOUND == 'true'
         run: |
-          mkdir rustedit_full
-          patchkit-tools download-app --secret 17ad1bce388b0f0a7566b8a8597c53d6 --output rustedit_full/ --force
+          mkdir -p rustedit_full
+          ./patchkit-tools/patchkit-tools download --secret 17ad1bce388b0f0a7566b8a8597c53d6 --output rustedit_full/ --force
 
       - name: Create ZIP Archive
         if: env.NEW_VERSION_FOUND == 'true'
