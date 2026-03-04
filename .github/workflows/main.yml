@@ -2,151 +2,65 @@ name: Automate RustEdit Archiving
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Автоматический запуск каждые 6 часов
-  workflow_dispatch:      # Кнопка для ручного запуска во вкладке Actions
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
 
 jobs:
   archive-rustedit:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     permissions:
-      contents: write # Права на создание релизов и коммитов
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Fetch Latest Version from PatchKit API
-        id: api_check
+      - name: Download and Archive
+        shell: bash
         run: |
-          $appSecret = "17ad1bce388b0f0a7566b8a8597c53d6"
-          $response = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$appSecret/versions/latest"
+          SECRET="17ad1bce388b0f0a7566b8a8597c53d6"
           
-          Write-Output "Latest Version Label: $($response.label)"
-          echo "LATEST_LABEL=$($response.label)" >> $env:GITHUB_ENV
+          # 1. Получаем ID последней версии
+          LATEST_JSON=$(curl -s "https://api2.patchkit.net/1/apps/$SECRET/versions/latest")
+          VERSION_ID=$(echo $LATEST_JSON | jq -r '.id')
+          VERSION_LABEL=$(echo $LATEST_JSON | jq -r '.label')
           
-          # Читаем локальную сохраненную версию из репозитория
-          $localVersion = "0"
-          if (Test-Path "version_info/last_version.txt") {
-            $localVersion = Get-Content "version_info/last_version.txt"
-          }
-          echo "LOCAL_LABEL=$localVersion" >> $env:GITHUB_ENV
+          echo "Latest Version: $VERSION_LABEL (ID: $VERSION_ID)"
+          
+          # 2. Проверяем, нужно ли скачивать
+          mkdir -p version_info
+          if [ -f "version_info/last_version.txt" ]; then
+            LOCAL_VERSION=$(cat version_info/last_version.txt)
+            if [ "$LOCAL_VERSION" == "$VERSION_LABEL" ]; then
+              echo "Already up to date."
+              exit 0
+            fi
+          fi
+          
+          # 3. Получаем прямую ссылку на скачивание (CDN)
+          URL_JSON=$(curl -s "https://api2.patchkit.net/1/apps/$SECRET/versions/$VERSION_ID/content_urls")
+          # Берем первую доступную ссылку
+          DOWNLOAD_URL=$(echo $URL_JSON | jq -r '.[0].url')
+          
+          echo "Downloading from: $DOWNLOAD_URL"
+          curl -L "$DOWNLOAD_URL" -o "RustEdit_v$VERSION_LABEL.zip"
+          
+          # 4. Сохраняем версию
+          echo "$VERSION_LABEL" > version_info/last_version.txt
+          echo "VERSION_LABEL=$VERSION_LABEL" >> $GITHUB_ENV
 
-      - name: Compare Versions
-        id: check_update
-        run: |
-          if ("${{ env.LATEST_LABEL }}" -eq "${{ env.LOCAL_LABEL }}") {
-            Write-Output "Version ${{ env.LATEST_LABEL }} is already up-to-date. Exiting."
-            exit 0
-          } else {
-            Write-Output "New version detected! Proceeding to download..."
-          }
-
-      - name: 1. Dynamically Download Patcher
-        if: env.LATEST_LABEL != env.LOCAL_LABEL
-        run: |
-          $appSecret = "17ad1bce388b0f0a7566b8a8597c53d6"
-          
-          Write-Output "Fetching App Info to find Patcher Secret..."
-          $appInfo = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$appSecret"
-          $patcherSecret = $appInfo.patcher_secret
-          Write-Output "Patcher Secret: $patcherSecret"
-          
-          Write-Output "Fetching Latest Patcher Version..."
-          $patcherVersion = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$patcherSecret/versions/latest"
-          $patcherVid = $patcherVersion.id
-          
-          Write-Output "Fetching Patcher Download URL..."
-          $patcherUrls = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$patcherSecret/versions/$patcherVid/content_urls"
-          $downloadUrl = $patcherUrls[0].url
-          
-          Write-Output "Downloading Patcher ZIP..."
-          Invoke-WebRequest -Uri $downloadUrl -OutFile "patcher.zip"
-          
-          Write-Output "Extracting Patcher..."
-          Expand-Archive -Path "patcher.zip" -DestinationPath "patcher_extracted" -Force
-
-      - name: 2. Download RustEdit using Patcher
-        if: env.LATEST_LABEL != env.LOCAL_LABEL
-        run: |
-          mkdir RustEdit_App
-          $installDir = Join-Path $PWD "RustEdit_App"
-          
-          # Ищем распакованный EXE-файл патчера
-          $patcherExe = (Get-ChildItem -Path "patcher_extracted" -Filter "*.exe" -Recurse | Where-Object { $_.Name -match "Patcher" } | Select-Object -First 1).FullName
-          Write-Output "Using Patcher executable: $patcherExe"
-          
-          Write-Output "Starting Patcher to download full RustEdit files..."
-          
-          # Запускаем патчер в скрытом режиме и заставляем его работать внутри папки RustEdit_App
-          $patcherArgs = "--secret 17ad1bce388b0f0a7566b8a8597c53d6 --readable -batchmode -nographics"
-          Start-Process -FilePath "$patcherExe" -ArgumentList $patcherArgs -WorkingDirectory "$installDir" -NoNewWindow
-          
-          $timeout = 900 # Максимальное время скачивания - 15 минут
-          $stopwatch =[Diagnostics.Stopwatch]::StartNew()
-          $isDownloaded = $false
-          
-          Write-Output "Waiting for download to finish..."
-          
-          while ($stopwatch.Elapsed.TotalSeconds -lt $timeout) {
-              $patcherRunning = Get-Process "*Patcher*" -ErrorAction SilentlyContinue
-              $gameRunning = Get-Process "RustEdit" -ErrorAction SilentlyContinue
-              
-              if ($gameRunning) {
-                  Write-Output "RustEdit.exe has launched! Download is complete."
-                  $isDownloaded = $true
-                  break
-              }
-              
-              if (-not $patcherRunning) {
-                  Write-Output "Patcher process exited gracefully."
-                  $isDownloaded = $true
-                  break
-              }
-              
-              Start-Sleep -Seconds 5
-          }
-          
-          if (-not $isDownloaded) {
-              Write-Error "Timeout reached or Patcher hung!"
-          }
-          
-          Write-Output "Cleaning up processes..."
-          Stop-Process -Name "*Patcher*" -Force -ErrorAction SilentlyContinue
-          Stop-Process -Name "RustEdit*" -Force -ErrorAction SilentlyContinue
-          
-          # Удаляем временную папку загрузок (кэш патчера), чтобы она не утяжеляла ZIP-архив
-          if (Test-Path "$installDir\.downloads") {
-              Remove-Item -Path "$installDir\.downloads" -Recurse -Force -ErrorAction SilentlyContinue
-          }
-          
-          Write-Output "RustEdit Download Finished!"
-
-      - name: 3. Compress downloaded game into ZIP
-        if: env.LATEST_LABEL != env.LOCAL_LABEL
-        run: |
-          Write-Output "Compressing RustEdit files into ZIP archive..."
-          # Пакуем полностью скачанную папку программы
-          Compress-Archive -Path "RustEdit_App\*" -DestinationPath "RustEdit_v${{ env.LATEST_LABEL }}.zip"
-
-      - name: 4. Create GitHub Release
-        if: env.LATEST_LABEL != env.LOCAL_LABEL
+      - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v${{ env.LATEST_LABEL }}
-          name: "RustEdit v${{ env.LATEST_LABEL }}"
-          files: RustEdit_v${{ env.LATEST_LABEL }}.zip
-          body: "Automated archive of RustEdit version ${{ env.LATEST_LABEL }} downloaded directly via PatchKit CDN."
+          tag_name: v${{ env.VERSION_LABEL }}
+          files: RustEdit_v${{ env.VERSION_LABEL }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: 5. Update Local Version Tracker
-        if: env.LATEST_LABEL != env.LOCAL_LABEL
+      - name: Commit version
         run: |
-          if (!(Test-Path "version_info")) { mkdir version_info }
-          echo "${{ env.LATEST_LABEL }}" > version_info/last_version.txt
-          
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add version_info/last_version.txt
-          git commit -m "Auto-update tracked version to ${{ env.LATEST_LABEL }}"
+          git commit -m "Update to ${{ env.VERSION_LABEL }}"
           git push
