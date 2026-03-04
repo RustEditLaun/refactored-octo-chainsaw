@@ -2,14 +2,14 @@ name: Automate RustEdit Archiving
 
 on:
   schedule:
-    - cron: '0 */6 * * *' # Запуск каждые 6 часов
-  workflow_dispatch:      # Кнопка для ручного запуска в интерфейсе GitHub
+    - cron: '0 */6 * * *' # Автоматический запуск каждые 6 часов
+  workflow_dispatch:      # Кнопка для ручного запуска в Actions
 
 jobs:
   archive-rustedit:
     runs-on: windows-latest
     permissions:
-      contents: write # Права на создание релизов и пуш файлов в репозиторий
+      contents: write # Права на создание релизов и коммитов
 
     steps:
       - name: Checkout repository
@@ -18,15 +18,13 @@ jobs:
       - name: Fetch Latest Version from PatchKit API
         id: api_check
         run: |
-          # Используем API для получения метаданных (ID и Label, например "1.1.42")
-          $response = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/17ad1bce388b0f0a7566b8a8597c53d6/versions/latest"
+          $appSecret = "17ad1bce388b0f0a7566b8a8597c53d6"
+          $response = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$appSecret/versions/latest"
           
           Write-Output "Latest Version Label: $($response.label)"
-          Write-Output "Latest Version ID: $($response.id)"
-          
           echo "LATEST_LABEL=$($response.label)" >> $env:GITHUB_ENV
           
-          # Читаем локальную версию из файла
+          # Читаем локальную сохраненную версию из репозитория
           $localVersion = "0"
           if (Test-Path "version_info/last_version.txt") {
             $localVersion = Get-Content "version_info/last_version.txt"
@@ -38,22 +36,50 @@ jobs:
         run: |
           if ("${{ env.LATEST_LABEL }}" -eq "${{ env.LOCAL_LABEL }}") {
             Write-Output "Version ${{ env.LATEST_LABEL }} is already up-to-date. Exiting."
-            exit 0 # Успешный выход, если обновлений нет
+            exit 0
           } else {
             Write-Output "New version detected! Proceeding to download..."
           }
 
-      - name: Download Application using Patcher
+      - name: 1. Dynamically Download Patcher
         if: env.LATEST_LABEL != env.LOCAL_LABEL
         run: |
-          # Создаем папку, куда патчер скачает полные файлы
+          $appSecret = "17ad1bce388b0f0a7566b8a8597c53d6"
+          
+          Write-Output "Fetching App Info to find Patcher Secret..."
+          $appInfo = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$appSecret"
+          $patcherSecret = $appInfo.patcher_secret
+          Write-Output "Patcher Secret: $patcherSecret"
+          
+          Write-Output "Fetching Latest Patcher Version..."
+          $patcherVersion = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$patcherSecret/versions/latest"
+          $patcherVid = $patcherVersion.id
+          
+          Write-Output "Fetching Patcher Download URL..."
+          $patcherUrls = Invoke-RestMethod -Uri "https://api2.patchkit.net/1/apps/$patcherSecret/versions/$patcherVid/content_urls"
+          $downloadUrl = $patcherUrls[0].url
+          
+          Write-Output "Downloading Patcher ZIP..."
+          Invoke-WebRequest -Uri $downloadUrl -OutFile "patcher.zip"
+          
+          Write-Output "Extracting Patcher..."
+          Expand-Archive -Path "patcher.zip" -DestinationPath "patcher_extracted" -Force
+
+      - name: 2. Download RustEdit using Patcher
+        if: env.LATEST_LABEL != env.LOCAL_LABEL
+        run: |
           mkdir RustEdit_App
+          $installDir = Join-Path $PWD "RustEdit_App"
           
-          # Запускаем патчер. Передаем ключи, чтобы он качал именно туда.
-          Write-Output "Starting RustEdit Patcher..."
-          Start-Process -FilePath ".\patcher\RustEdit Patcher.exe" -ArgumentList "--installdir `"$PWD\RustEdit_App`" --secret 17ad1bce388b0f0a7566b8a8597c53d6" -NoNewWindow
+          # Ищем распакованный EXE-файл патчера (имя может слегка отличаться)
+          $patcherExe = (Get-ChildItem -Path "patcher_extracted" -Filter "*.exe" -Recurse | Where-Object { $_.Name -match "Patcher" } | Select-Object -First 1).FullName
+          Write-Output "Using Patcher executable: $patcherExe"
           
-          # Цикл ожидания: ждем, пока процесс патчера завершится (таймаут 15 минут)
+          Write-Output "Starting Patcher to download full RustEdit files..."
+          # Запускаем патчер, чтобы он скачал полные файлы программы
+          Start-Process -FilePath "$patcherExe" -ArgumentList "--installdir `"$installDir`" --secret 17ad1bce388b0f0a7566b8a8597c53d6" -NoNewWindow
+          
+          # Ожидаем завершения загрузки игры (до 15 минут)
           $timeout = 900 
           $stopwatch = [Diagnostics.Stopwatch]::StartNew()
           
@@ -61,20 +87,19 @@ jobs:
               Start-Sleep -Seconds 5
           }
           
-          # Патчер PatchKit обычно АВТОМАТИЧЕСКИ запускает целевое приложение (RustEdit.exe) после загрузки
-          # Убиваем процесс RustEdit, иначе GitHub Action зависнет навечно!
+          # Убиваем процесс RustEdit, если патчер сам попытался его запустить
           Start-Sleep -Seconds 10
           Stop-Process -Name "RustEdit*" -ErrorAction SilentlyContinue
-          
-          Write-Output "Download and extraction phase finished!"
+          Write-Output "RustEdit Download Finished!"
 
-      - name: Compress downloaded files into ZIP
+      - name: 3. Compress downloaded game into ZIP
         if: env.LATEST_LABEL != env.LOCAL_LABEL
         run: |
-          Write-Output "Compressing files..."
+          Write-Output "Compressing RustEdit files into ZIP archive..."
+          # Пакуем полностью скачанную папку программы
           Compress-Archive -Path "RustEdit_App\*" -DestinationPath "RustEdit_v${{ env.LATEST_LABEL }}.zip"
 
-      - name: Create GitHub Release
+      - name: 4. Create GitHub Release
         if: env.LATEST_LABEL != env.LOCAL_LABEL
         uses: softprops/action-gh-release@v1
         with:
@@ -85,7 +110,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Commit and Push new version_info
+      - name: 5. Update Local Version Tracker
         if: env.LATEST_LABEL != env.LOCAL_LABEL
         run: |
           if (!(Test-Path "version_info")) { mkdir version_info }
