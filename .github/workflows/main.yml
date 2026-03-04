@@ -1,0 +1,89 @@
+name: RustEdit Auto-Archiver
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Every 6 hours
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  check-and-download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Get Latest Version from PatchKit
+        id: patchkit_info
+        run: |
+          VERSION_DATA=$(curl -s https://api2.patchkit.net/1/apps/17ad1bce388b0f0a7566b8a8597c53d6/versions/latest)
+          LABEL=$(echo $VERSION_DATA | grep -oP '"label":"\K[^"]+')
+          echo "LATEST_LABEL=$LABEL" >> $GITHUB_ENV
+          echo "Latest version on PatchKit: $LABEL"
+
+      - name: Read Last Archived Version
+        id: last_version
+        run: |
+          if [ -f version_info/last_version.txt ]; then
+            LAST_LABEL=$(cat version_info/last_version.txt)
+          else
+            LAST_LABEL="none"
+          fi
+          echo "LAST_LABEL=$LAST_LABEL" >> $GITHUB_ENV
+          echo "Last archived version: $LAST_LABEL"
+
+      - name: Compare Versions
+        id: compare
+        run: |
+          if [ "${{ env.LATEST_LABEL }}" == "${{ env.LAST_LABEL }}" ]; then
+            echo "NEW_VERSION_FOUND=false" >> $GITHUB_ENV
+            echo "No new version found."
+          else
+            echo "NEW_VERSION_FOUND=true" >> $GITHUB_ENV
+            echo "New version detected: ${{ env.LATEST_LABEL }}"
+          fi
+
+      - name: Install PatchKit Tools
+        if: env.NEW_VERSION_FOUND == 'true'
+        run: |
+          wget https://github.com/patchkit-net/patchkit-tools/releases/download/v3.5.1/patchkit-tools-linux-x86_64.zip
+          unzip patchkit-tools-linux-x86_64.zip -d patchkit-tools
+          chmod +x patchkit-tools/patchkit-tools
+          echo "$(pwd)/patchkit-tools" >> $GITHUB_PATH
+
+      - name: Download RustEdit Full
+        if: env.NEW_VERSION_FOUND == 'true'
+        run: |
+          mkdir rustedit_full
+          patchkit-tools download-app --secret 17ad1bce388b0f0a7566b8a8597c53d6 --output rustedit_full/ --force
+
+      - name: Create ZIP Archive
+        if: env.NEW_VERSION_FOUND == 'true'
+        run: |
+          zip -r RustEdit_v${{ env.LATEST_LABEL }}.zip rustedit_full/
+
+      - name: Create GitHub Release
+        if: env.NEW_VERSION_FOUND == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.LATEST_LABEL }}
+          name: RustEdit v${{ env.LATEST_LABEL }}
+          files: RustEdit_v${{ env.LATEST_LABEL }}.zip
+          body: |
+            Automated archive of RustEdit version ${{ env.LATEST_LABEL }}.
+            Downloaded via PatchKit API.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update Last Version File
+        if: env.NEW_VERSION_FOUND == 'true'
+        run: |
+          mkdir -p version_info
+          echo "${{ env.LATEST_LABEL }}" > version_info/last_version.txt
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add version_info/last_version.txt
+          git commit -m "chore: update last archived version to ${{ env.LATEST_LABEL }}"
+          git push
